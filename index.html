@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Ball Catcher Game</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      font-family:Arial,sans-serif;
+      background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+      min-height:100vh; display:flex;
+      align-items:center; justify-content:center;
+      overflow:hidden;
+    }
+    /* ----- Home Screen ----- */
+    #homeScreen {
+      background:rgba(255,255,255,0.95); padding:40px;
+      border-radius:20px; box-shadow:0 10px 40px rgba(0,0,0,0.2);
+      text-align:center; max-width:500px; width:100%;
+      animation:fadeIn 0.5s ease;
+    }
+    @keyframes fadeIn {
+      from{opacity:0;transform:translateY(-20px)}
+      to{opacity:1;transform:translateY(0)}
+    }
+    #homeScreen h2 { color:#667eea; margin-bottom:20px; font-size:1.8em;}
+    #homeScreen input, #homeScreen button {
+      width:100%; padding:15px; margin-bottom:20px;
+      font-size:1em; border-radius:10px; border:2px solid #ddd;
+    }
+    #homeScreen button {
+      background:#667eea; color:#fff; border:none;
+      cursor:pointer; transition:background 0.3s;
+    }
+    #homeScreen button:hover { background:#5a67d8; }
+    #highScores { margin-top:30px; text-align:left; }
+    #scoresList div { margin-bottom:8px; }
+
+    /* ----- Game Screen Wrappers ----- */
+    #gameScreen { display:none; position:relative; width:100vw; height:100vh; }
+    #gameHeader {
+      position:absolute; top:0; left:0; width:100%; height:60px;
+      background:#667eea; display:flex; align-items:center;
+      justify-content:center; z-index:1000;
+    }
+    #gameHeader button {
+      background:transparent; border:none; color:#fff;
+      font-size:1em; cursor:pointer; padding:0 20px; height:100%;
+    }
+    #gameHeader button:hover { background:rgba(255,255,255,0.2); }
+
+    #gameCanvas {
+      position:absolute; top:60px; left:0;
+      width:100%; height:calc(100% - 60px);
+      background:#87CEEB;
+    }
+    #scoreBoard {
+      position:absolute; top:80px; left:20px;
+      background:rgba(255,255,255,0.8); padding:10px 20px;
+      border-radius:10px; font-size:1.2em; font-weight:bold;
+      z-index:1001;
+    }
+    .popup {
+      position:absolute; font-size:1.2em; font-weight:bold;
+      pointer-events:none; opacity:0; animation:pop 0.5s forwards;
+    }
+    @keyframes pop {
+      0% { transform:translateY(0); opacity:1 }
+      100% { transform:translateY(-50px); opacity:0 }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- HOME SCREEN -->
+  <div id="homeScreen">
+    <h2>🎯 Ball Catcher</h2>
+    <input type="text" id="playerName" placeholder="Enter your name" />
+    <button onclick="startGame()">Start Game</button>
+    <div id="highScores">
+      <h2>🏆 High Scores</h2>
+      <div id="scoresList"></div>
+    </div>
+  </div>
+
+  <!-- GAME SCREEN -->
+  <div id="gameScreen">
+    <div id="gameHeader">
+      <button onclick="goHome()">Back to Home</button>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+    <div id="scoreBoard">Score: 0</div>
+  </div>
+
+  <!-- MODULE SCRIPT: Firebase + Game Logic -->
+  <script type="module">
+    // -------- Firebase Imports --------
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js';
+    import {
+      getFirestore,
+      collection,
+      addDoc,
+      getDocs,
+      query,
+      orderBy,
+      limit,
+      serverTimestamp
+    } from 'https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js';
+
+    // ----- Your Firebase Config -----
+    const firebaseConfig = {
+      apiKey: "AIzaSyBc1WUJ97r66NHuve9C8yQstOcC3qQGoSw",
+      authDomain: "ballgame-d9468.firebaseapp.com",
+      projectId: "ballgame-d9468",
+      storageBucket: "ballgame-d9468.firebasestorage.app",
+      messagingSenderId: "480399806575",
+      appId: "1:480399806575:web:6638c00bc9b60dc69d3d9a"
+    };
+
+    // ----- Init Firebase & Firestore -----
+    const app = initializeApp(firebaseConfig);
+    const db  = getFirestore(app);
+
+    // --------- Game Variables ----------
+    let canvas, ctx;
+    let score = 0, gameRunning = false, playerName = '';
+    let balls = [], netX = 0;
+    const netWidth = 120, netHeight = 20;
+    const ballRadius = 30, ballSpeed = 2;
+    let spawnInterval, gameLoopId, gameTimer;
+    const gameDuration = 20000; // ← 20 seconds
+
+    // --- Load Local Ball Images ---
+    const goodBallImage = new Image();
+    goodBallImage.src = 'images/good-ball.png';
+    const badBallImage  = new Image();
+    badBallImage.src  = 'images/bad-ball.png';
+
+    // ----- Firestore-backed High Scores -----
+    async function saveHighScore(name, score) {
+      try {
+        await addDoc(collection(db, 'highScores'), {
+          name,
+          score,
+          timestamp: serverTimestamp()
+        });
+      } catch (e) {
+        console.error('Error writing score to Firestore', e);
+      }
+    }
+
+    async function displayHighScores() {
+      const container = document.getElementById('scoresList');
+      container.innerHTML = '';
+      const q = query(
+        collection(db, 'highScores'),
+        orderBy('score', 'desc'),
+        limit(5)
+      );
+      const snap = await getDocs(q);
+      snap.forEach(doc => {
+        const { name, score } = doc.data();
+        const div = document.createElement('div');
+        div.textContent = `${name}: ${score}`;
+        container.appendChild(div);
+      });
+    }
+    // initial load
+    displayHighScores();
+
+    // -------- Start / Init Game --------
+    function startGame() {
+      playerName = document.getElementById('playerName').value.trim();
+      if (!playerName) {
+        alert('Please enter your name!');
+        return;
+      }
+      document.getElementById('homeScreen').style.display = 'none';
+      document.getElementById('gameScreen').style.display = 'block';
+      initGame();
+    }
+
+    function initGame() {
+      canvas = document.getElementById('gameCanvas');
+      ctx    = canvas.getContext('2d');
+      canvas.width  = window.innerWidth;
+      canvas.height = window.innerHeight - 60;
+
+      score       = 0;
+      balls       = [];
+      gameRunning = true;
+      updateScore();
+
+      canvas.addEventListener('mousemove', e => {
+        netX = e.clientX - netWidth/2;
+      });
+      canvas.addEventListener('touchmove', e => {
+        netX = e.touches[0].clientX - netWidth/2;
+      });
+
+      spawnBall();
+      spawnInterval = setInterval(spawnBall, 1500);
+      gameLoopId    = requestAnimationFrame(gameLoop);
+      gameTimer     = setTimeout(endGame, gameDuration);
+    }
+
+    function spawnBall() {
+      balls.push({
+        x: Math.random() * (canvas.width - ballRadius*2) + ballRadius,
+        y: -ballRadius,
+        speed: ballSpeed + Math.random()*2,
+        type: Math.random() < 0.8 ? 'good' : 'bad'
+      });
+    }
+
+    // --------- Main Loop -----------
+    function gameLoop() {
+      if (!gameRunning) return;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      balls = balls.filter(ball => {
+        ball.y += ball.speed;
+
+        // collision
+        if (
+          ball.y + ballRadius >= canvas.height - netHeight - 50 &&
+          ball.y - ballRadius <= canvas.height - 50 &&
+          ball.x >= netX && ball.x <= netX + netWidth
+        ) {
+          if (ball.type === 'good') {
+            score += 10;
+            showScorePopup(ball.x, ball.y, '+10', '#4CAF50');
+          } else {
+            score -= 5;
+            showScorePopup(ball.x, ball.y, '-5', '#F44336');
+          }
+          updateScore();
+          return false;
+        }
+
+        // draw image
+        const img = ball.type === 'good' ? goodBallImage : badBallImage;
+        ctx.drawImage(
+          img,
+          ball.x - ballRadius,
+          ball.y - ballRadius,
+          ballRadius*2,
+          ballRadius*2
+        );
+
+        return ball.y < canvas.height + ballRadius;
+      });
+
+      // draw net
+      ctx.fillStyle   = '#8B4513';
+      ctx.fillRect(netX, canvas.height - netHeight - 50, netWidth, netHeight);
+      ctx.strokeStyle = '#A0522D';
+      ctx.lineWidth   = 3;
+      for (let i = 1; i < netWidth/20; i++) {
+        ctx.beginPath();
+        ctx.moveTo(netX + i*20, canvas.height - netHeight - 50);
+        ctx.lineTo(netX + i*20, canvas.height - 50);
+        ctx.stroke();
+      }
+
+      gameLoopId = requestAnimationFrame(gameLoop);
+    }
+
+    // ------- UI Helpers -------
+    function showScorePopup(x,y,text,color) {
+      const p = document.createElement('div');
+      p.className = 'popup';
+      p.style.left  = x + 'px';
+      p.style.top   = y + 'px';
+      p.style.color = color;
+      p.textContent = text;
+      document.body.appendChild(p);
+      setTimeout(() => p.remove(), 500);
+    }
+
+    function updateScore() {
+      document.getElementById('scoreBoard').textContent = `Score: ${score}`;
+    }
+
+    async function endGame() {
+      gameRunning = false;
+      clearInterval(spawnInterval);
+      cancelAnimationFrame(gameLoopId);
+
+      const again = confirm(`Time's up! Your score: ${score}\nPlay again?`);
+      if (again) {
+        initGame();
+      } else {
+        await saveHighScore(playerName, score);
+        await displayHighScores();
+        goHome();
+      }
+    }
+
+    function goHome() {
+      document.getElementById('gameScreen').style.display = 'none';
+      document.getElementById('homeScreen').style.display = 'block';
+      clearTimeout(gameTimer);
+    }
+
+    window.addEventListener('resize', () => {
+      if (gameRunning) {
+        canvas.width  = window.innerWidth;
+        canvas.height = window.innerHeight - 60;
+      }
+    });
+  </script>
+
+</body>
+</html>
